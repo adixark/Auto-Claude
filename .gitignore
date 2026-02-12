@@ -11,8 +11,8 @@ Desktop.ini
 # ===========================
 # Security - Environment & Secrets
 # ===========================
-.env
-.env.*
+# .env
+# .env.*
 !.env.example
 /config.json
 *.pem

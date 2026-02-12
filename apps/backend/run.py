@@ -29,7 +29,11 @@ Prerequisites:
 """
 
 import sys
+# from pathlib import Path
 
+# ROOT = Path(__file__).resolve().parent
+# if str(ROOT) not in sys.path:
+#     sys.path.insert(0, str(ROOT))
 # Python version check - must be before any imports using 3.10+ syntax
 if sys.version_info < (3, 10):  # noqa: UP036
     sys.exit(

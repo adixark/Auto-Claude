@@ -1,0 +1,151 @@
+#!/usr/bin/env python3
+"""
+Auto Claude CLI launcher for packaged app.
+Uses bundled Python + site-packages and loads credentials from app userData.
+Routes --task / --interactive / --continue to spec_runner.py; all else to run.py.
+"""
+
+import os
+import sys
+
+SCRIPT_DIR = os.path.dirname(os.path.realpath(__file__))
+
+# Resources is TWO levels up from cli/
+RESOURCES_DIR = os.path.abspath(
+    os.path.join(SCRIPT_DIR, "../..")
+)
+
+
+def get_app_user_data_dir():
+    """Return the app's userData directory (same as Electron app.getPath('userData'))."""
+    # Electron uses package name "auto-claude-ui" for userData path
+    app_name = "auto-claude-ui"
+    if sys.platform == "darwin":
+        base = os.path.join(os.path.expanduser("~"), "Library", "Application Support")
+    elif sys.platform == "win32":
+        base = os.environ.get("APPDATA", os.path.expanduser("~"))
+    else:
+        base = os.path.join(os.path.expanduser("~"), ".config")
+    return os.path.join(base, app_name)
+
+
+def load_env_file(path):
+    """
+    Parse a .env file and return a dict of key=value. Skips comments and empty lines.
+    """
+    result = {}
+    if not os.path.isfile(path):
+        return result
+    try:
+        with open(path, "r", encoding="utf-8", errors="replace") as f:
+            for line in f:
+                line = line.strip()
+                if not line or line.startswith("#"):
+                    continue
+                if "=" in line:
+                    key, _, value = line.partition("=")
+                    key = key.strip()
+                    value = value.strip()
+                    if len(value) >= 2 and (
+                        (value.startswith('"') and value.endswith('"'))
+                        or (value.startswith("'") and value.endswith("'"))
+                    ):
+                        value = value[1:-1]
+                    if key:
+                        result[key] = value
+    except OSError:
+        pass
+    return result
+
+
+def get_active_api_profile_env(user_data_dir):
+    """
+    Get ANTHROPIC_BASE_URL and ANTHROPIC_AUTH_TOKEN from active API profile.
+    Reads userData/auto-claude/profiles.json (API profiles with baseUrl + apiKey).
+    """
+    import json
+    path = os.path.join(user_data_dir, "auto-claude", "profiles.json")
+    if not os.path.isfile(path):
+        return None, None
+    try:
+        with open(path, "r", encoding="utf-8", errors="replace") as f:
+            data = json.load(f)
+    except (OSError, json.JSONDecodeError, TypeError):
+        return None, None
+    if not isinstance(data, dict):
+        return None, None
+    active_id = data.get("activeProfileId")
+    profiles = data.get("profiles") if isinstance(data.get("profiles"), list) else []
+    if not active_id or not profiles:
+        return None, None
+    for p in profiles:
+        if isinstance(p, dict) and p.get("id") == active_id:
+            base_url = (p.get("baseUrl") or "").strip()
+            api_key = (p.get("apiKey") or "").strip()
+            if base_url and api_key:
+                return base_url, api_key
+            return None, None
+    return None, None
+
+
+def bundled_python():
+    if sys.platform == "win32":
+        return os.path.join(RESOURCES_DIR, "python", "python.exe")
+    return os.path.join(RESOURCES_DIR, "python", "bin", "python3")
+
+
+# Create/continue spec -> spec_runner.py; list/run/merge/qa etc -> run.py
+SPEC_RUNNER_FLAGS = {"--task", "--task-file", "--interactive", "--continue"}
+
+
+def use_spec_runner(args):
+    return any(arg in SPEC_RUNNER_FLAGS for arg in args)
+
+
+def main():
+    python = bundled_python()
+    backend_dir = os.path.join(RESOURCES_DIR, "backend")
+    run_py = os.path.join(backend_dir, "run.py")
+    spec_runner_py = os.path.join(backend_dir, "runners", "spec_runner.py")
+    site_packages = os.path.join(RESOURCES_DIR, "python-site-packages")
+
+    if not os.path.exists(python):
+        sys.stderr.write(
+            f"[autoclaude] Bundled Python not found:\n{python}\n"
+        )
+        sys.exit(1)
+
+    env = os.environ.copy()
+
+    # Load app userData .env so CLI uses same token/URL as the UI (Settings)
+    user_data = get_app_user_data_dir()
+    env_file = os.path.join(user_data, "backend", ".env")
+
+    for key, value in load_env_file(env_file).items():
+        if key not in env:
+            env[key] = value
+    # Fallback: use active API profile (baseUrl + apiKey) from userData/auto-claude/profiles.json
+    if not env.get("CLAUDE_CODE_OAUTH_TOKEN") and not env.get("ANTHROPIC_AUTH_TOKEN"):
+        base_url, auth_token = get_active_api_profile_env(user_data)
+        if base_url and auth_token:
+            env["ANTHROPIC_BASE_URL"] = base_url
+            env["ANTHROPIC_AUTH_TOKEN"] = auth_token
+
+    path_sep = ";" if sys.platform == "win32" else ":"
+    if "PYTHONPATH" in env:
+        env["PYTHONPATH"] = f"{site_packages}{path_sep}{env['PYTHONPATH']}"
+    else:
+        env["PYTHONPATH"] = site_packages
+
+    env["PYTHONIOENCODING"] = "utf-8"
+    env["PYTHONUTF8"] = "1"
+    env["PYTHONDONTWRITEBYTECODE"] = "1"
+    env["PYTHONNOUSERSITE"] = "1"
+
+    args = sys.argv[1:]
+    script = spec_runner_py if use_spec_runner(args) else run_py
+    os.execve(python, [python, script] + args, env)
+
+
+if __name__ == "__main__":
+    main()
